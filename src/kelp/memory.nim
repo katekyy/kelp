@@ -1,0 +1,167 @@
+import ./vpointer
+
+
+const ChunkSize = 1
+
+var allocUID: uint = 0
+
+
+type
+  Chunk* = ref object
+    vp*: VirtualPointer
+    allocUID*: uint
+    parentID*: int
+    data*: pointer
+
+  MemoryManager* = ref object of MemoryManagerObject
+  MemoryManagerObject* = object of RootObj
+    chunks*: seq[Chunk]
+    greedy*: bool
+
+  UnprivilegedAccessError* = object of CatchableError
+  InvalidRegionSizeError* = object of CatchableError
+
+
+proc error(self: MemoryManager, accessor: int, err: typedesc, msg: string) =
+  raise newException(err, "@" & $accessor & " - invalid memory access: " & msg)
+
+proc `=destroy`(x: MemoryManagerObject) =
+  for chunk in x.chunks:
+    dealloc chunk.data
+
+proc newMemoryManager*(greedy: bool = false): MemoryManager =
+  result = new MemoryManager
+  result.greedy = greedy
+
+proc addChunk*(self: MemoryManager, parentID: int, allocUID: uint) =
+  let data = alloc(ChunkSize)
+  cast[ptr uint8](data)[] = 0
+  self.chunks.add Chunk(
+    vp: vpointer self.chunks.len,
+    allocUID: allocUID,
+    parentID: parentID,
+    data: data
+  )
+
+proc seekFree*(self: MemoryManager, start: VirtualPointer = vpointer 0): tuple[start: VirtualPointer, size: int] =
+  result.start = vpointer -1
+  for idx, chunk in self.chunks[start..self.chunks.high]:
+    if chunk.parentID < 0:
+      if result.start < 0:
+        result.start = vpointer idx
+      inc result.size
+
+    if result.start >= 0 and not chunk.parentID < 0:
+      return
+
+proc seekFreeSized*(self: MemoryManager, size: SomeInteger = 1): tuple[start: VirtualPointer, size: int] =
+  result.start = vpointer -1
+  var start = vpointer 0
+  while start < self.chunks.len:
+    let free = self.seekFree(start)
+
+    if free.start == -1: return
+    if free.size >= size: return free
+
+    start = free.start + free.size
+
+proc seekFreeLast*(self: MemoryManager): int =
+  result = -1
+  if self.chunks.len == 0 or not self.chunks[self.chunks.high].parentID < 0: return
+  result = self.chunks.high
+  while result != 0 and self.chunks[result].parentID < 0:
+    dec result
+  if not self.chunks[result].parentID < 0:
+    inc result
+
+## if accessor is `-1` there's no owner check
+iterator peekChunks*(self: MemoryManager, accessor: int, vp: VirtualPointer): Chunk =
+  if accessor >= 0 and self.chunks[vp.toInt].parentID != accessor:
+    self.error(accessor, UnprivilegedAccessError, "unprivileged access to memory at 0x" & $vp)
+  var idx = toInt vp
+  while idx < self.chunks.len and self.chunks[idx].parentID == accessor and self.chunks[idx].allocUID == self.chunks[vp.toInt].allocUID:
+    yield self.chunks[idx]
+    inc idx
+
+func size*(self: MemoryManager, accessor: int, vp: VirtualPointer): int =
+  for _ in self.peekChunks(accessor, vp):
+    inc result
+
+proc alloc*(self: MemoryManager, accessor: int, size: range[1..int.high]): VirtualPointer =
+  let free = self.seekFreeSized(size)
+  if free.start < 0:
+    let freeLast = self.seekFreeLast()
+
+    if freeLast >= 0:
+      result = vpointer freeLast
+      let freeLastLen = self.size(-1, vpointer freeLast)
+
+      for i in freeLast..self.chunks.high:
+        self.chunks[i].parentID = accessor
+        self.chunks[i].allocUID = allocUID
+
+      for _ in 1..size - freeLastLen:
+        self.addChunk(accessor, allocUID)
+
+    else:
+      result = vpointer self.chunks.len
+      for _ in 1..size:
+        self.addChunk(accessor, allocUID)
+      inc allocUID
+  else:
+    result = vpointer free.start.toInt
+
+    let rangeEnd: int =
+      if self.greedy:
+        toInt free.start + free.size - 1
+      else: toInt free.start + size - 1
+
+    for idx in free.start.toInt..rangeEnd:
+      self.chunks[idx].parentID = accessor
+      self.chunks[idx].allocUID = allocUID
+    inc allocUID
+
+proc free*(self: MemoryManager, accessor: int, vp: VirtualPointer) =
+  for chunk in self.peekChunks(accessor, vp):
+    cast[ptr uint8](chunk.data)[] = 0
+    chunk.parentID = -1
+
+proc dealloc*(self: MemoryManager, accessor: int, vp: VirtualPointer) =
+  let
+    vpi = toInt vp
+    startUID = self.chunks[vpi].allocUID
+  while vp < self.chunks.len and self.chunks[vpi].parentID == accessor and self.chunks[vpi].allocUID == startUID:
+    dealloc self.chunks[vpi].data
+    self.chunks.delete(vpi)
+
+proc peek*(self: MemoryManager, accessor: int, vp: VirtualPointer): uint8 =
+  for chunk in self.peekChunks(accessor, vp):
+    return cast[ptr uint8](chunk.data)[]
+proc write*(self: MemoryManager, accessor: int, vp: VirtualPointer, value: uint8) =
+
+  for chunk in self.peekChunks(accessor, vp):
+    cast[ptr uint8](chunk.data)[] = value
+    return
+
+proc move*(self: MemoryManager, accessor: int, vpSrc, vpDst: VirtualPointer) =
+  let
+    srcLen = self.size(accessor, vpSrc)
+    dstLen = self.size(accessor, vpDst)
+  if srcLen > dstLen:
+    self.error(accessor, InvalidRegionSizeError, "move destination cannot be smaller than the source.")
+  for i in 0..srcLen - 1:
+    self.write(accessor, vpDst + i, self.peek(accessor, vpSrc + i))
+    cast[ptr uint8](self.chunks[toInt vpSrc + i].data)[] = 0
+    self.chunks[toInt vpSrc + i].parentID = -1
+
+proc realloc*(self: MemoryManager, accessor: int, vp: VirtualPointer, newSize: int): VirtualPointer =
+  result = vp
+  let length = self.size(accessor, vp)
+
+  if length == newSize: return
+  elif length > newSize:
+    self.free(accessor, vp + newSize)
+  else:
+    let newVp = self.alloc(accessor, newSize)
+    self.move(accessor, vp, newVp)
+    result = newVp
