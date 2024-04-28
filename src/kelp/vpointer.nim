@@ -76,8 +76,8 @@ proc `>`*(a: VirtualPointer, b: SomeInteger): bool =
 proc `>=`*(a, b: VirtualPointer): bool =
   result = a > b or a == b
 
-proc `>=`*(a: int, b: VirtualPointer): bool =
+proc `>=`*(a: SomeInteger, b: VirtualPointer): bool =
   result = a > b or a == b
 
-proc `>=`*(a: VirtualPointer, b: int): bool =
+proc `>=`*(a: VirtualPointer, b: SomeInteger): bool =
   result = a > b or a == b
