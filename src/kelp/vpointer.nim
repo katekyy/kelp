@@ -10,50 +10,47 @@ proc vpointer*(p: SomeInteger): VirtualPointer =
 
 
 proc `$`*(vp: VirtualPointer): string =
-  result = cast[int](vp).toHex
-
-proc toInt*(vp: VirtualPointer): SomeInteger =
-  result = cast[int](vp)
+  result = vp.int.toHex
 
 
 proc `+`*(a, b: VirtualPointer): VirtualPointer =
-  result = vpointer a.toInt + b.toInt
+  result = vpointer a.int + b.int
 
 proc `+`*(a: SomeInteger, b: VirtualPointer): VirtualPointer =
-  result = vpointer a + b.toInt
+  result = vpointer a + b.int
 
 proc `+`*(a: VirtualPointer, b: SomeInteger): VirtualPointer =
-  result = vpointer a.toInt + b
+  result = vpointer a.int + b
 
 
 proc `-`*(a, b: VirtualPointer): VirtualPointer =
-  result = vpointer a.toInt - b.toInt
+  result = vpointer a.int - b.int
 
 proc `-`*(a: SomeInteger, b: VirtualPointer): VirtualPointer =
-  result = vpointer a - b.toInt
+  result = vpointer a - b.int
 
 proc `-`*(a: VirtualPointer, b: SomeInteger): VirtualPointer =
-  result = vpointer a.toInt - b
+  result = vpointer a.int - b
 
 
 proc `==`*(a, b: VirtualPointer): bool =
-  result = a.toInt == b.toInt
+  result = a.int == b.int
 
 proc `==`*(a: SomeInteger, b: VirtualPointer): bool =
-  result = a == b.toInt
+  result = a == b.int
 
 proc `==`*(a: VirtualPointer, b: SomeInteger): bool =
-  result = a.toInt == b
+  result = a.int == b
 
 
 proc `<`*(a, b: VirtualPointer): bool =
-  result = a.toInt < b.toInt
+  result = a.int < b.int
 
 proc `<`*(a: SomeInteger, b: VirtualPointer): bool =
-  result = a < b.toInt
+  result = a < b.int
 
 proc `<`*(a: VirtualPointer, b: SomeInteger): bool =
-  result = a.toInt < b
+  result = a.int < b
 
 
 proc `<=`*(a, b: VirtualPointer): bool =
@@ -67,13 +64,13 @@ proc `<=`*(a: VirtualPointer, b: int): bool =
 
 
 proc `>`*(a, b: VirtualPointer): bool =
-  result = a.toInt > b.toInt
+  result = a.int > b.int
 
 proc `>`*(a: SomeInteger, b: VirtualPointer): bool =
-  result = a > b.toInt
+  result = a > b.int
 
 proc `>`*(a: VirtualPointer, b: SomeInteger): bool =
-  result = a.toInt > b
+  result = a.int > b
 
 
 proc `>=`*(a, b: VirtualPointer): bool =
