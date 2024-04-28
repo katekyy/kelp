@@ -11,14 +11,14 @@ type
   Chunk* = ref object
     vp*: VirtualPointer
     allocUID*: uint
-    parentID*: int
+    ownerID*: int
     data*: pointer
 
   MemoryManager* = ref MemoryManagerObject
   MemoryManagerObject* = object
     chunks*: seq[Chunk]
     greedy*: bool
-    capacity*: HSlice[int, int] = HSlice[int, int](a: -1, b: -1)
+    capacity*: HSlice[int, int]
 
   InvalidMemoryAddressError* = object of CatchableError
   UnprivilegedAccessError* = object of CatchableError
@@ -28,15 +28,15 @@ type
 proc `$`*(cs: seq[Chunk], columns: int = 4): string =
   var longestID = 0
   for c in cs:
-    if c.parentID < 0: continue
-    if ($c.parentID).len > longestID: longestID = ($c.parentID).len
+    if c.ownerID < 0: continue
+    if ($c.ownerID).len > longestID: longestID = ($c.ownerID).len
 
   for i, c in cs:
     result &= $c.vp & "["
-    if c.parentID < 0:
+    if c.ownerID < 0:
       result &= " ".repeat(longestID) & " ~" & c.data.repr & "]"
     else:
-      result &= "@" & $c.parentID & "~" & c.data.repr & "]"
+      result &= "@" & $c.ownerID & "~" & c.data.repr & "]"
     result &= " | "
     if i mod columns == (columns - 1): result &= "\n"
 
@@ -47,29 +47,30 @@ proc `=destroy`*(x: MemoryManagerObject) =
   for chunk in x.chunks:
     dealloc chunk.data
 
-proc newMemoryManager*(greedy: bool = false): MemoryManager =
+proc newMemoryManager*(capacity: HSlice[int, int] = HSlice[int, int](a: 0, b: -1), greedy: bool = false): MemoryManager =
   result = new MemoryManager
+  result.capacity = capacity
   result.greedy = greedy
 
-proc addChunk*(self: MemoryManager, parentID: int, allocUID: uint) =
+proc addChunk*(self: MemoryManager, ownerID: int, allocUID: uint) =
   let data = alloc(ChunkSize)
   cast[ptr uint8](data)[] = 0
   self.chunks.add Chunk(
     vp: vpointer self.chunks.len,
     allocUID: allocUID,
-    parentID: parentID,
+    ownerID: ownerID,
     data: data
   )
 
 proc seekFree*(self: MemoryManager, start: VirtualPointer = vpointer 0): tuple[start: VirtualPointer, size: int] =
   result.start = vpointer -1
   for idx, chunk in self.chunks[start..self.chunks.high]:
-    if chunk.parentID < 0:
+    if chunk.ownerID < 0:
       if result.start < 0:
         result.start = vpointer idx
       inc result.size
 
-    if result.start >= 0 and not chunk.parentID < 0:
+    if result.start >= 0 and not chunk.ownerID < 0:
       return
 
 proc seekFreeSized*(self: MemoryManager, size: SomeInteger = 1): tuple[start: VirtualPointer, size: int] =
@@ -85,21 +86,21 @@ proc seekFreeSized*(self: MemoryManager, size: SomeInteger = 1): tuple[start: Vi
 
 proc seekFreeLast*(self: MemoryManager): int =
   result = -1
-  if self.chunks.len == 0 or not self.chunks[self.chunks.high].parentID < 0: return
+  if self.chunks.len == 0 or not self.chunks[self.chunks.high].ownerID < 0: return
   result = self.chunks.high
-  while result != 0 and self.chunks[result].parentID < 0:
+  while result != 0 and self.chunks[result].ownerID < 0:
     dec result
-  if not self.chunks[result].parentID < 0:
+  if not self.chunks[result].ownerID < 0:
     inc result
 
 ## if accessor is `-1` there's no ownership check
 iterator peekChunks*(self: MemoryManager, accessor: int, vp: VirtualPointer): Chunk =
   if vp.int >= self.chunks.len:
     self.error(accessor, InvalidMemoryAddressError, "address " & $vp & " is out of range")
-  if accessor >= 0 and self.chunks[int vp].parentID != accessor:
+  if accessor >= 0 and self.chunks[int vp].ownerID != accessor:
     self.error(accessor, UnprivilegedAccessError, "unprivileged access to memory at 0x" & $vp)
   var idx = int vp
-  while idx < self.chunks.len and self.chunks[idx].parentID == accessor and self.chunks[idx].allocUID == self.chunks[int vp].allocUID:
+  while idx < self.chunks.len and self.chunks[idx].ownerID == accessor and self.chunks[idx].allocUID == self.chunks[int vp].allocUID:
     yield self.chunks[idx]
     inc idx
 
@@ -117,7 +118,7 @@ proc alloc*(self: MemoryManager, accessor: int, size: range[1..int.high]): Virtu
       let freeLastLen = self.size(-1, vpointer freeLast)
 
       for i in freeLast..self.chunks.high:
-        self.chunks[i].parentID = accessor
+        self.chunks[i].ownerID = accessor
         self.chunks[i].allocUID = allocUID
 
       for _ in 1..size - freeLastLen:
@@ -137,20 +138,20 @@ proc alloc*(self: MemoryManager, accessor: int, size: range[1..int.high]): Virtu
       else: int free.start + size - 1
 
     for idx in free.start.int..rangeEnd:
-      self.chunks[idx].parentID = accessor
+      self.chunks[idx].ownerID = accessor
       self.chunks[idx].allocUID = allocUID
     inc allocUID
 
 proc free*(self: MemoryManager, accessor: int, vp: VirtualPointer) =
   for chunk in self.peekChunks(accessor, vp):
     cast[ptr uint8](chunk.data)[] = 0
-    chunk.parentID = -1
+    chunk.ownerID = -1
 
 proc dealloc*(self: MemoryManager, accessor: int, vp: VirtualPointer) =
   let
     vpi = int vp
     startUID = self.chunks[vpi].allocUID
-  while vp < self.chunks.len and self.chunks[vpi].parentID == accessor and self.chunks[vpi].allocUID == startUID:
+  while vp < self.chunks.len and self.chunks[vpi].ownerID == accessor and self.chunks[vpi].allocUID == startUID:
     dealloc self.chunks[vpi].data
     self.chunks.delete(vpi)
 
@@ -176,7 +177,7 @@ proc move*(self: MemoryManager, accessor: int, vpSrc, vpDst: VirtualPointer) =
   for i in 0..srcLen - 1:
     self.write(accessor, vpDst + i, self.peek(accessor, vpSrc + i))
     cast[ptr uint8](self.chunks[int vpSrc + i].data)[] = 0
-    self.chunks[int vpSrc + i].parentID = -1
+    self.chunks[int vpSrc + i].ownerID = -1
 
 proc realloc*(self: MemoryManager, accessor: int, vp: VirtualPointer, newSize: int): VirtualPointer =
   result = vp
