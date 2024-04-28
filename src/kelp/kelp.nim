@@ -1,22 +1,24 @@
 import ./[
   memory,
-  blade,
-  code,
+  blade
 ]
 
 
 type
   Kelp* = ref object
-    threads*: seq[Blade]
+    blades*: seq[Blade]
     mem*: MemoryManager
 
 
 proc newKelp*(): Kelp =
   result = new Kelp
 
-proc newBlade*(self: Kelp, code: seq[int16]) =
-  self.threads.add newBlade(
+proc newBlade*(self: Kelp, code: seq[uint8]): Blade =
+  let id = self.blades.len
+  self.blades.add newBlade(
     self.mem,
-    self.threads.len,
+    id,
     code
   )
+  result = self.blades[id]
+
