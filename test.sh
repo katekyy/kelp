@@ -1,0 +1,1 @@
+nimble -d:nimOldCaseObjects test

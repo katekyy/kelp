@@ -1,5 +1,5 @@
 import unittest
-import std/os
+import std/asyncdispatch
 
 import kelp/[
   memory,
@@ -8,15 +8,25 @@ import kelp/[
   vpointer,
 ]
 
-test "1":
+
+test "vm":
   let vm = newKelp()
-  check true
+  asyncCheck vm.newBlade(@[
+    0x0'u8, 0x3, 0x0, 0x0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x0, 0x2, 0x0, 0x1, 0x0, 0x0,
+  ]).start()
+
 
 test "memory manager":
   let
     mem = newMemoryManager()
-    owner1 = 1
-    owner2 = 2
+    owner1 = 0
+    owner2 = 1
+
+  try:
+    discard mem.size(owner1, vpointer 0)
+    check false
+  except InvalidMemoryAddressError: check true
 
   let p1 = mem.alloc(owner2, 4)
   check p1 == 0
@@ -36,5 +46,4 @@ test "memory manager":
   check mem.size(owner1, p3) == 8
 
   when defined(debug):
-    for chunk in mem.chunks:
-      echo chunk.repr
+    echo mem.chunks
