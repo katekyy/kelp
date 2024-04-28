@@ -14,8 +14,8 @@ type
     parentID*: int
     data*: pointer
 
-  MemoryManager* = ref object of MemoryManagerObject
-  MemoryManagerObject* = object of RootObj
+  MemoryManager* = ref MemoryManagerObject
+  MemoryManagerObject* = object
     chunks*: seq[Chunk]
     greedy*: bool
     capacity*: HSlice[int, int] = HSlice[int, int](a: -1, b: -1)
