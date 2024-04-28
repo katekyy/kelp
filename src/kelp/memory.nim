@@ -1,5 +1,6 @@
 import ./vpointer
 
+from std/strutils import repeat
 
 const ChunkSize = 1
 
@@ -17,15 +18,32 @@ type
   MemoryManagerObject* = object of RootObj
     chunks*: seq[Chunk]
     greedy*: bool
+    capacity*: HSlice[int, int] = HSlice[int, int](a: -1, b: -1)
 
+  InvalidMemoryAddressError* = object of CatchableError
   UnprivilegedAccessError* = object of CatchableError
   InvalidRegionSizeError* = object of CatchableError
 
 
+proc `$`*(cs: seq[Chunk], columns: int = 4): string =
+  var longestID = 0
+  for c in cs:
+    if c.parentID < 0: continue
+    if ($c.parentID).len > longestID: longestID = ($c.parentID).len
+
+  for i, c in cs:
+    result &= $c.vp & "["
+    if c.parentID < 0:
+      result &= " ".repeat(longestID) & " ~" & c.data.repr & "]"
+    else:
+      result &= "@" & $c.parentID & "~" & c.data.repr & "]"
+    result &= " | "
+    if i mod columns == (columns - 1): result &= "\n"
+
 proc error(self: MemoryManager, accessor: int, err: typedesc, msg: string) =
   raise newException(err, "@" & $accessor & " - invalid memory access: " & msg)
 
-proc `=destroy`(x: MemoryManagerObject) =
+proc `=destroy`*(x: MemoryManagerObject) =
   for chunk in x.chunks:
     dealloc chunk.data
 
@@ -74,12 +92,14 @@ proc seekFreeLast*(self: MemoryManager): int =
   if not self.chunks[result].parentID < 0:
     inc result
 
-## if accessor is `-1` there's no owner check
+## if accessor is `-1` there's no ownership check
 iterator peekChunks*(self: MemoryManager, accessor: int, vp: VirtualPointer): Chunk =
-  if accessor >= 0 and self.chunks[vp.toInt].parentID != accessor:
+  if vp.int >= self.chunks.len:
+    self.error(accessor, InvalidMemoryAddressError, "address " & $vp & " is out of range")
+  if accessor >= 0 and self.chunks[int vp].parentID != accessor:
     self.error(accessor, UnprivilegedAccessError, "unprivileged access to memory at 0x" & $vp)
-  var idx = toInt vp
-  while idx < self.chunks.len and self.chunks[idx].parentID == accessor and self.chunks[idx].allocUID == self.chunks[vp.toInt].allocUID:
+  var idx = int vp
+  while idx < self.chunks.len and self.chunks[idx].parentID == accessor and self.chunks[idx].allocUID == self.chunks[int vp].allocUID:
     yield self.chunks[idx]
     inc idx
 
@@ -109,14 +129,14 @@ proc alloc*(self: MemoryManager, accessor: int, size: range[1..int.high]): Virtu
         self.addChunk(accessor, allocUID)
       inc allocUID
   else:
-    result = vpointer free.start.toInt
+    result = vpointer free.start.int
 
     let rangeEnd: int =
       if self.greedy:
-        toInt free.start + free.size - 1
-      else: toInt free.start + size - 1
+        int free.start + free.size - 1
+      else: int free.start + size - 1
 
-    for idx in free.start.toInt..rangeEnd:
+    for idx in free.start.int..rangeEnd:
       self.chunks[idx].parentID = accessor
       self.chunks[idx].allocUID = allocUID
     inc allocUID
@@ -128,17 +148,21 @@ proc free*(self: MemoryManager, accessor: int, vp: VirtualPointer) =
 
 proc dealloc*(self: MemoryManager, accessor: int, vp: VirtualPointer) =
   let
-    vpi = toInt vp
+    vpi = int vp
     startUID = self.chunks[vpi].allocUID
   while vp < self.chunks.len and self.chunks[vpi].parentID == accessor and self.chunks[vpi].allocUID == startUID:
     dealloc self.chunks[vpi].data
     self.chunks.delete(vpi)
 
-proc peek*(self: MemoryManager, accessor: int, vp: VirtualPointer): uint8 =
+iterator peekAll*(self: MemoryManager, accessor: int, vp: VirtualPointer): uint8 =
   for chunk in self.peekChunks(accessor, vp):
-    return cast[ptr uint8](chunk.data)[]
-proc write*(self: MemoryManager, accessor: int, vp: VirtualPointer, value: uint8) =
+    yield cast[ptr uint8](chunk.data)[]
 
+proc peek*(self: MemoryManager, accessor: int, vp: VirtualPointer): uint8 =
+  for b in self.peekAll(accessor, vp):
+    return b
+
+proc write*(self: MemoryManager, accessor: int, vp: VirtualPointer, value: uint8) =
   for chunk in self.peekChunks(accessor, vp):
     cast[ptr uint8](chunk.data)[] = value
     return
@@ -151,17 +175,15 @@ proc move*(self: MemoryManager, accessor: int, vpSrc, vpDst: VirtualPointer) =
     self.error(accessor, InvalidRegionSizeError, "move destination cannot be smaller than the source.")
   for i in 0..srcLen - 1:
     self.write(accessor, vpDst + i, self.peek(accessor, vpSrc + i))
-    cast[ptr uint8](self.chunks[toInt vpSrc + i].data)[] = 0
-    self.chunks[toInt vpSrc + i].parentID = -1
+    cast[ptr uint8](self.chunks[int vpSrc + i].data)[] = 0
+    self.chunks[int vpSrc + i].parentID = -1
 
 proc realloc*(self: MemoryManager, accessor: int, vp: VirtualPointer, newSize: int): VirtualPointer =
   result = vp
   let length = self.size(accessor, vp)
-
-  if length == newSize: return
-  elif length > newSize:
+  if length > newSize:
     self.free(accessor, vp + newSize)
-  else:
+  elif length < newSize:
     let newVp = self.alloc(accessor, newSize)
     self.move(accessor, vp, newVp)
     result = newVp
