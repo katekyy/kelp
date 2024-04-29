@@ -2,6 +2,7 @@ import ./[
   registers,
   vpointer,
   memory,
+  atoms,
   code
 ]
 
@@ -14,6 +15,7 @@ type
     pc*: int
     mem*: MemoryManager
     rem*: RegisterManager
+    atoms*: AtomManager
     code*: Code
 
 
@@ -22,6 +24,7 @@ proc newBlade*(mem: MemoryManager, id: int, code: seq[uint8]): Blade =
     id: id,
     mem: mem,
     rem: newRegisterManager(),
+    atoms: newAtomManager(),
     code: parseCode code
   )
 
@@ -49,14 +52,47 @@ proc start*(self: Blade) {.async.} =
     of Move:
       case current.layout:
       of RegisterInstant:
-        self.rem.write(current.args[0].register, current.args[1].instant)
+        self.rem.write(current.operands[0].register, current.operands[1].instant)
       of RegisterRegister:
-        self.rem.write(current.args[0].register, self.rem.peek(current.args[1].register))
+        self.rem.write(current.operands[0].register, self.rem.peek(current.operands[1].register))
       else: discard
-    else: echo self.code[self.pc]
 
+    of Compare:
+      let dstValue = self.rem.peek(current.operands[0].register)
+      let compareSrc =
+        if current.layout == RegisterInstant:
+          current.operands[1].instant
+        elif current.layout == RegisterRegister:
+          self.rem.peek(current.operands[1].register)
+        else: 0 # TODO ERROR
+
+      var compareResult: uint64 = 0
+      if dstValue == compareSrc:
+        compareResult = 0b010
+      elif dstValue > compareSrc:
+        compareResult = 0b100
+      elif dstValue < compareSrc:
+        compareResult = 0x001
+
+      self.rem.write(current.operands[0].register, compareResult)
+
+    of AtomTable:
+      if current.layout != InstantAtom: discard # ERROR
+      var idx = 1 # 0 is the table size
+      let tableSize = current.operands[0].instant.int
+      self.atoms.initAtomManager(tableSize)
+
+      while idx < tableSize + 1:
+        self.atoms.setAtom(current.operands[idx].instant.int, current.operands[idx + 1].bytes)
+        inc idx, 2
+
+    else: echo "unknown: " & $self.code[self.pc]
+
+    echo "------"
     echo "reg0 = " & $self.rem.peek(0)
     echo "reg1 = " & $self.rem.peek(1)
+    echo "atoms = " & $self.atoms
+    echo "------"
 
     if incrementPC: inc self.pc
     discard
