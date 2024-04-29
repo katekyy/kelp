@@ -15,7 +15,7 @@ type
     data*: pointer
 
   MemoryManager* = ref MemoryManagerObject
-  MemoryManagerObject* = object
+  MemoryManagerObject = object
     chunks*: seq[Chunk]
     greedy*: bool
     capacity*: HSlice[int, int]
