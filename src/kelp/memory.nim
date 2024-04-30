@@ -26,6 +26,7 @@ type
 
 
 proc `$`*(cs: seq[Chunk], columns: int = 4): string =
+  result = "VirtualMemory[\n  "
   var longestID = 0
   for c in cs:
     if c.ownerID < 0: continue
@@ -34,11 +35,12 @@ proc `$`*(cs: seq[Chunk], columns: int = 4): string =
   for i, c in cs:
     result &= $c.vp & "["
     if c.ownerID < 0:
-      result &= " ".repeat(longestID) & " ~" & c.data.repr & "]"
+      result &= " ".repeat(longestID + 1) & "~" & c.data.repr & "]"
     else:
       result &= "@" & $c.ownerID & "~" & c.data.repr & "]"
     result &= " | "
-    if i mod columns == (columns - 1): result &= "\n"
+    if i mod columns == (columns - 1): result &= "\n  "
+  result &= "\n]"
 
 proc error(self: MemoryManager, accessor: int, err: typedesc, msg: string) =
   raise newException(err, "@" & $accessor & " - invalid memory access: " & msg)
@@ -53,8 +55,7 @@ proc newMemoryManager*(capacity: HSlice[int, int] = HSlice[int, int](a: 0, b: -1
   result.greedy = greedy
 
 proc addChunk*(self: MemoryManager, ownerID: int, allocUID: uint) =
-  let data = alloc(ChunkSize)
-  cast[ptr uint8](data)[] = 0
+  let data = alloc0(ChunkSize)
   self.chunks.add Chunk(
     vp: vpointer self.chunks.len,
     allocUID: allocUID,
