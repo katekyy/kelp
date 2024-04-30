@@ -1,1 +1,1 @@
-nimble -d:nimOldCaseObjects test
+nimble -d:nimOldCaseObjects $1 test
