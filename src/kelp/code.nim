@@ -27,7 +27,7 @@ type
     Label
     FunctionSpec
     FunctionCall
-    VMOpt
+    VMOpt # 18
     HeapFree
     HeapAlloc
     HeapRealloc
@@ -47,6 +47,7 @@ type
     InstantInstant
     InstantAtom
     InstantInstantInstant
+    InstantVariadic
 
   Operand* = object
     case kind*: OperandKind:
@@ -92,6 +93,12 @@ type
 #   Atom ID (64bit)                                                                 Atom Size (64bit)                                                               Bytes ([]8bit)
 #   +------------------------------------------------------------------------------ +------------------------------------------------------------------------------ +-------- +-------- ...
 # b 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0101 0000 0000 0000 0000
+
+#   Variadic (64bit + 16bit * count)
+#   +------------------------------------------------------------------------------------------------------------...
+#   Register Count (64bit)                                                          Argument (16bit)
+#   +------------------------------------------------------------------------------ +------------------...
+# b 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000
 
 
 proc getInstant*(bytes: seq[uint8], start: int = 0): Operand =
@@ -155,25 +162,6 @@ proc parseCode*(bytes: seq[uint8]): Code =
       instruction.operands.add bytes.getInstant(idx)
       inc idx, InstantLength
 
-    of InstantAtom:
-      bytes.inBounds InstantLength, "atomtable size is an instant, thus it "
-      let tableSize = bytes.getInstant(idx)
-      instruction.operands.add tableSize
-      inc idx, InstantLength
-
-      for _ in 0..tableSize.instant - 1:
-        bytes.inBounds InstantLength * 2, "atom id and size are instants, thus they "
-        instruction.operands.add bytes.getInstant(idx)
-        let length = bytes.getInstant(idx + InstantLength).instant.int
-        bytes.inBounds length, "atom"
-
-        instruction.operands.add bytes.getAtom(
-          idx + InstantLength * 2,
-          length
-        )
-
-        inc idx, InstantLength * 2 + length
-
     of RegisterRegister:
       bytes.inBounds RegisterLength * 2, "register"
       instruction.operands.add bytes.getRegister idx
@@ -185,6 +173,28 @@ proc parseCode*(bytes: seq[uint8]): Code =
       instruction.operands.add bytes.getRegister idx
       instruction.operands.add bytes.getInstant idx + RegisterLength
       inc idx, RegisterLength + InstantLength
+
+    of InstantAtom:
+      bytes.inBounds InstantLength, "instant"
+      let tableSize = bytes.getInstant(idx)
+      instruction.operands.add tableSize
+      inc idx, InstantLength
+
+      for _ in 0..tableSize.instant - 1:
+        bytes.inBounds InstantLength * 2, "atom's ID and size are instants, thus they "
+        instruction.operands.add bytes.getInstant(idx)
+        let length = bytes.getInstant(idx + InstantLength).instant.int
+        bytes.inBounds length, "atom"
+
+        instruction.operands.add bytes.getAtom(
+          idx + InstantLength * 2,
+          length
+        )
+
+        inc idx, InstantLength * 2 + length
+
+    of InstantVariadic:
+      bytes.inBounds InstantLength * 2, ""
 
     else: discard
 
