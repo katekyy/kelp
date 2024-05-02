@@ -9,7 +9,7 @@ type
 
 proc newRegisters(): array[RegisterCount, Register] =
   for i in 0..RegisterCount - 1:
-    result[i] = cast[ptr uint64]( alloc(8) )
+    result[i] = cast[ptr uint64]( alloc0(8) )
 
 proc `=destory`*(x: RegisterManagerObject) =
   for reg in x.regs:
