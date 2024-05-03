@@ -19,7 +19,7 @@ proc newRegisterManager*(): RegisterManager =
   result = new RegisterManager
   result.regs = newRegisters()
 
-proc write*(self: RegisterManager, reg: uint16, value: uint64) =
+proc store*(self: RegisterManager, reg: uint16, value: uint64) =
   self.regs[reg][] = value
 
 proc peek*(self: RegisterManager, reg: uint16): uint64 =
