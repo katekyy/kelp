@@ -101,7 +101,7 @@ proc assemble*(content: string): seq[uint8] =
       if idx + 1 >= tokens.len:
         echo "todo asm err3"
         return
-      inc idx, 1
+      inc idx
       while idx < tokens.len:
         echo tokens[idx].kind
         if tokens[idx].kind == tkEndOfLine:
