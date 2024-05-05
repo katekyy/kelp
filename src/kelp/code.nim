@@ -2,7 +2,10 @@ import std/strutils
 
 
 const
-  InstructionLength* = 2
+  MagicBytes* = [0x4B'u8, 0x42]
+  MagicBytesCompressed* = [0x4B'u8, 0x43]
+
+  InstructionLength* = 1
   RegisterLength* = 2
   InstantLength* = 8
 
@@ -22,52 +25,47 @@ type
     JumpLT
     JumpGE
     JumpLE
-    AtomTable # 13
+    Label # 13
     Goto
-    Label
-    FunctionSpec
-    FunctionCall
-    VMOpt # 18
     HeapFree
     HeapAlloc
     HeapRealloc
     HeapDealloc
     HeapPeek
     HeapWrite
+    AtomicGroup
+    Send
+    Recieve
+    FunctionSpec
+    FunctionCall
+    VMOpt
 
   OperandKind* = enum
-    Register
-    Instant
-    Atom
-
-  OperandLayout* = enum
-    Instant
-    RegisterRegister
-    RegisterInstant
-    InstantInstant
-    InstantAtom
-    InstantInstantInstant
-    InstantVariadic
+    okRegister
+    okInstant
+    okAtom
+    okEnd = 0xF
 
   Operand* = object
     case kind*: OperandKind:
-    of Register: register*: uint16
-    of Instant: instant*: uint64
-    of Atom:
+    of okRegister: register*: uint16
+    of okInstant: instant*: uint64
+    of okAtom:
       id*: uint64
       bytes*: seq[uint8]
+    of okEnd: discard
 
   Instruction* = object
     kind*: InstructionKind
-    layout*: OperandLayout
-    operands*: seq[Operand]
+    ops*: seq[Operand]
 
   Code* = seq[Instruction]
 
   InstructionKindOutOfBoundsError* = object of CatchableError
-  OperandLayoutOutOfBoundsError* = object of CatchableError
+  OperandKindOutOfBoundsError* = object of CatchableError
+  InvalidBytecodeError* = object of CatchableError
   TooFewOperandsError* = object of CatchableError
-  AtomNotInRangeError* = object of CatchableError
+  ByteRangeError* = object of CatchableError
 
 
 #           Instruction (8bit)
@@ -89,20 +87,20 @@ type
 # b (64bit) 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000
 
 #   Atom (64bit + 8bit * size)
-#   +---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- ...
-#   Atom ID (64bit)                                                                 Atom Size (64bit)                                                               Bytes ([]8bit)
-#   +------------------------------------------------------------------------------ +------------------------------------------------------------------------------ +-------- +-------- ...
-# b 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0101 0000 0000 0000 0000
-
-#   Variadic (64bit + 16bit * count)
-#   +------------------------------------------------------------------------------------------------------------...
-#   Register Count (64bit)                                                          Argument (16bit)
-#   +------------------------------------------------------------------------------ +------------------...
-# b 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000
+#   +-------------------------------------------------------------------------------------------------- ...
+#   Atom Size (64bit)                                                               Bytes ([]8bit)
+#   +------------------------------------------------------------------------------ +-------- +-------- ...
+# b 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0101 0000 0000 0000 0000
 
 
-proc getInstant*(bytes: seq[uint8], start: int = 0): Operand =
-  result.kind = Instant
+proc getOpKind*(bytes: seq[uint8], start: int): OperandKind =
+  let i = bytes[start].int
+  if not (i in 0..2 or i == OperandKind.high.int):
+    raise newException(OperandKindOutOfBoundsError, "TODO: MSG")
+  result = cast[OperandKind]( i )
+
+proc getInstant*(bytes: seq[uint8], start: int): Operand =
+  result.kind = okInstant
   result.instant =
     (bytes[start    ].uint64 shl 56) or
     (bytes[start + 1].uint64 shl 48) or
@@ -113,91 +111,67 @@ proc getInstant*(bytes: seq[uint8], start: int = 0): Operand =
     (bytes[start + 6].uint64 shl 8 ) or
      bytes[start + 7].uint64
 
-proc getRegister*(bytes: seq[uint8], start: int = 0): Operand =
-  result.kind = Register
+proc getRegister*(bytes: seq[uint8], start: int): Operand =
+  if bytes.len - start + 1 < RegisterLength:
+    raise newException(TooFewOperandsError, "TODO: MSG")
+  result.kind = okRegister
   result.register = (bytes[start].uint16 shl 8) or bytes[start + 1].uint16
 
-proc getAtom*(bytes: seq[uint8], start: int = 0, length: int): Operand =
-  result.kind = Atom
+proc getAtom*(bytes: seq[uint8], start: int): Operand =
+  if bytes.len - start < InstantLength:
+    raise newException(TooFewOperandsError, "TODO: MSG")
+  let length = bytes.getInstant(start).instant.int
+
+  result.kind = okAtom
   result.bytes = newSeq[uint8](length)
+
+  if bytes.len - start < length:
+    raise newException(TooFewOperandsError, "TODO: MSG")
+
   for i in 0..length - 1:
-    let b = bytes[start + i]
+    let b = bytes[start + InstantLength + i]
     if not (b in 65'u8..90'u8 or b in 97'u8..122'u8 or b in 48'u8..57'u8):
       raise newException(
-        AtomNotInRangeError,
+        ByteRangeError,
         "byte " & $b & " at index " & $i & " of atom at " & $(start - InstantLength) & " is not in range of: 48..57, 65..90 or 96..122"
       )
     result.bytes[i] = b
 
-proc getInstruction*(bytes: seq[uint8], start: int = 0): Instruction =
-  let
-    kind = bytes[start]
-    layout = bytes[start + 1]
-
+proc getInstruction*(bytes: seq[uint8], start: int): ref Instruction =
+  result = new Instruction
+  if bytes.len - start < InstructionLength:
+    raise newException(TooFewOperandsError, "TODO: MSG")
+  let kind = bytes[start]
   if kind > uint8 InstructionKind.high:
     raise newException(InstructionKindOutOfBoundsError, "TODO: MSG")
-  if layout > uint8 OperandLayout.high:
-    raise newException(OperandLayoutOutOfBoundsError, "TODO: MSG")
-
   result.kind = InstructionKind kind
-  result.layout = OperandLayout layout
-
-proc inBounds(bytes: seq[uint8], idx: SomeInteger, msg: string) =
-  if bytes.len - idx.int <= 0:
-    raise newException(
-      TooFewOperandsError,
-      msg & " expected overall of " & $(bytes.len + idx.int) & " bytes but got " & $bytes.len
-    )
 
 proc parseCode*(bytes: seq[uint8]): Code =
-  var idx = 0
+  for idx, magic in MagicBytes:
+    if bytes[idx] != magic:
+      raise newException(InvalidBytecodeError, "TODO: MSG")
+  var
+    idx = MagicBytes.len
+    current: ref Instruction
+
   while idx < bytes.len:
-    bytes.inBounds InstructionLength, "instruction at index " & $idx
-    var instruction = bytes.getInstruction(idx)
-    inc idx, InstructionLength
-
-    case instruction.layout:
-    of Instant:
-      bytes.inBounds InstantLength, "instant at index " & $idx
-      instruction.operands.add bytes.getInstant(idx)
-      inc idx, InstantLength
-
-    of RegisterRegister:
-      bytes.inBounds RegisterLength * 2, "register"
-      instruction.operands.add bytes.getRegister idx
-      instruction.operands.add bytes.getRegister idx + RegisterLength
-      inc idx, RegisterLength * 2
-
-    of RegisterInstant:
-      bytes.inBounds RegisterLength + InstantLength, "register and instant"
-      instruction.operands.add bytes.getRegister idx
-      instruction.operands.add bytes.getInstant idx + RegisterLength
-      inc idx, RegisterLength + InstantLength
-
-    of InstantAtom:
-      bytes.inBounds InstantLength, "instant"
-      let tableSize = bytes.getInstant(idx)
-      instruction.operands.add tableSize
-      inc idx, InstantLength
-
-      for _ in 0..tableSize.instant - 1:
-        bytes.inBounds InstantLength * 2, "atom's ID and size are instants, thus they "
-        instruction.operands.add bytes.getInstant(idx)
-        let length = bytes.getInstant(idx + InstantLength).instant.int
-        bytes.inBounds length, "atom"
-
-        instruction.operands.add bytes.getAtom(
-          idx + InstantLength * 2,
-          length
-        )
-
-        inc idx, InstantLength * 2 + length
-
-    of InstantVariadic:
-      bytes.inBounds InstantLength * 2, ""
-
-    else: discard
-
-    echo instruction
-
-    result.add instruction
+    if current.isNil:
+      current = bytes.getInstruction(idx)
+      inc idx, InstructionLength
+    else:
+      let opKind = bytes.getOpKind(idx)
+      inc idx
+      case opKind:
+      of okRegister:
+        current.ops.add bytes.getRegister(idx)
+        inc idx, RegisterLength
+      of okInstant:
+        current.ops.add bytes.getInstant(idx)
+        inc idx, InstantLength
+      of okAtom:
+        let atom = bytes.getAtom(idx)
+        current.ops.add atom
+        inc idx, InstantLength + atom.bytes.len
+      of okEnd:
+        result.add current[]
+        current = nil

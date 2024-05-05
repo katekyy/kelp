@@ -1,6 +1,5 @@
-vmopt MM_GREEDY, 1
-
-halloc r0, 8
-hwrite r0, 255
-hpeek  r1, r0
-
+move: #0, 255
+label: 1
+label: 0
+halloc: #1, 8
+halloc: #1, 8

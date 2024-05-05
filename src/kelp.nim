@@ -1,6 +1,6 @@
 import kelp/[
-  thread,
-  memory
+  memory,
+  blade,
 ]
 
 {.push warning[Deprecated]: off.}
@@ -9,31 +9,35 @@ import std/[
 ]
 {.pop.}
 
+when isMainModule:
+  import kelp/assembler
+  import std/[syncio, strutils]
+
 export
-  thread
+  blade
 
 type
-  ThreadState* = enum
-    ThreadReady
-    ThreadRunning
-    ThreadExited
-    ThreadTrapped
+  BladeState* = enum
+    bsReady
+    bsRunning
+    bsExited
+    bsTrapped
 
-  ScheduledThread* = ref object
+  ScheduledBlade* = ref object
     priority*: int
-    thread*: LightThread
-    state*: ThreadState
+    blade*: Blade
+    state*: BladeState
 
   Scheduler* = ref object
     id*, ping*: int
     kelp*: Kelp
     shouldExit*: bool
-    scheduledThreads*, exitedThreads*: seq[int]
-    currentThread*, currentThreadTicks*: int
+    scheduledBlades*, exitedBlades*: seq[int]
+    currentBlade*, currentBladeTicks*: int
 
   Kelp* = ref object
     started*: bool
-    threads*: seq[ScheduledThread]
+    blades*: seq[ScheduledBlade]
     schedulers*: seq[Scheduler]
     latestScheduler*: int
     mem*: MemoryManager
@@ -51,65 +55,91 @@ proc newKelp*(): Kelp =
   for id in 0..result.schedulers.high:
     result.schedulers[id] = newScheduler(result, id)
 
-proc getCurrentThread(self: Scheduler): ScheduledThread =
-  result = self.kelp.threads[self.scheduledThreads[self.currentThread]]
+proc getCurrentBlade(self: Scheduler): ScheduledBlade =
+  result = self.kelp.blades[self.scheduledBlades[self.currentBlade]]
 
-proc switchThread(self: Scheduler): bool =
-  if self.currentThreadTicks > 0:
-    dec self.currentThreadTicks
-    return
-  self.currentThread = (self.currentThread + 1) mod self.scheduledThreads.len
-  if self.getCurrentThread.state == ThreadExited:
+proc switchBlade(self: Scheduler): bool =
+  if self.scheduledBlades.len == 0:
     return true
-  self.currentThreadTicks = self.getCurrentThread.priority
+  if self.currentBladeTicks > 0:
+    dec self.currentBladeTicks
+    return
+  self.currentBlade = (self.currentBlade + 1) mod self.scheduledBlades.len
+  if self.getCurrentBlade.state == bsExited:
+    return true
+  self.currentBladeTicks = self.getCurrentBlade.priority
 
 proc start(self: Scheduler) {.thread.} =
   while not self.kelp.started: sleep 1
-  self.shouldExit = (self.scheduledThreads.len == self.exitedThreads.len) or self.scheduledThreads.len == 0
   while not self.shouldExit:
     self.ping = (self.ping + 1) mod int.high
 
-    if self.scheduledThreads.len == 0:
-      self.shouldExit = true
-      continue
-    if self.switchThread:
+    if self.switchBlade:
       sleep 1
       continue
 
     var vmopt: int
     try:
-      vmopt = self.getCurrentThread.thread.step()
-    except:
-      echo "err"
-      self.getCurrentThread.state = ThreadTrapped
-      self.scheduledThreads.delete self.currentThread
+      vmopt = self.getCurrentBlade.blade.step()
+    except Exception as e:
+      echo "blade " & $self.getCurrentBlade.blade & " got trapped: " & e.msg
+      self.getCurrentBlade.state = bsTrapped
+      self.scheduledBlades.delete self.currentBlade
+      self.exitedBlades.add self.currentBlade
 
     case vmopt:
     of 1:
-      self.getCurrentThread.state = ThreadExited
-      self.exitedThreads.add self.currentThread
+      self.getCurrentBlade.state = bsExited
+      self.exitedBlades.add self.currentBlade
     else: discard
 
-proc scheduleThread(self: Scheduler, thread: int) =
-  if self.exitedThreads.len > 0:
-    self.scheduledThreads[self.exitedThreads.pop] = thread
+proc scheduleBlade(self: Scheduler, pid: int) =
+  if self.exitedBlades.len > 0:
+    self.scheduledBlades[self.exitedBlades.pop] = pid
   else:
-    self.scheduledThreads.add thread
+    self.scheduledBlades.add pid
   spawn self.start
 
-proc scheduleNewThread*(self: Kelp, code: seq[uint8], priority: range[0..255] = 0): int =
-  let thread = ScheduledThread(
+proc scheduleNewBlade*(self: Kelp, code: seq[uint8], priority: range[0..255] = 0): int =
+  let blade = ScheduledBlade(
     priority: priority,
-    thread: newLightThread(self.mem, self.threads.len, code)
+    blade: newBlade(self.mem, self.blades.len, code)
   )
-  self.threads.add thread
-  self.schedulers[self.latestScheduler].scheduleThread(thread.thread.id)
+  self.blades.add blade
+  self.schedulers[self.latestScheduler].scheduleBlade(blade.blade.pid)
   self.latestScheduler = (self.latestScheduler + 1) mod self.schedulers.len
+
+#proc debug*(self: Kelp) {.thread.} =
+#  while true:
+#    echo "--------------VM DEBUG--------------"
+#    for sched in self.schedulers:
+#      echo "sched: " & $sched.id & "; shouldExit: " & $sched.shouldExit & "; ping: " & $sched.ping
+#      echo "  thrs: " & $sched.scheduledBlades
+
+#    echo "------------------------------------"
+#    echo self.threads[0].state
+#    echo "------------------------------------"
+#    sleep 500
 
 proc start*(self: Kelp) {.thread.} =
   self.started = true
+  #spawn self.debug
   sync()
 
 
 when isMainModule:
+  let kb = assemble(open(commandLineParams().join()).readAll)
+
+  var buf = newStringOfCap(kb.len * 3 + 3)
+  buf.add "@["
+  for idx, b in kb:
+    buf.add b.repr
+    if idx == 0:
+      buf.add "'u8"
+    if idx != kb.high:
+      buf.add ", "
+  buf.add ']'
+  echo buf
+
+  writeFile "out.kb", kb
   echo "NOT IMPLEMENTED"
