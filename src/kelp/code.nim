@@ -4,12 +4,12 @@ const
 type
   OpKind* = enum
     okRegister
-    okInstant
+    okImmediate
     okBytes
 
   Operand* = object
     case kind*: OpKind:
-    of okRegister, okInstant: value*: uint64
+    of okRegister, okImmediate: value*: uint64
     of okBytes: bytes*: seq[uint8]
 
   InstructionKind* = enum
@@ -65,11 +65,11 @@ proc parseCode*(bytes: seq[uint8]): seq[Instruction] =
       of okRegister:
         op.value = (bytes[idx].uint64 shl 8) or bytes[idx + 1].uint64
         inc idx, 2
-      of okInstant:
-        let instantBytes = bytes[idx].int
-        for i in 1..instantBytes:
-          op.value = op.value or bytes[idx + i].uint64 shl ((instantBytes - i) * 8)
-        inc idx, instantBytes + 1
+      of okImmediate:
+        let immediateBytes = bytes[idx].int
+        for i in 1..immediateBytes:
+          op.value = op.value or bytes[idx + i].uint64 shl ((immediateBytes - i) * 8)
+        inc idx, immediateBytes + 1
       of okBytes:
         let bytesLen = bytes[idx].int
         for i in 1..bytesLen:

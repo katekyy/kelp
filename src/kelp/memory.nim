@@ -45,7 +45,7 @@ proc `$`*(cs: seq[Chunk], columns: int = 4): string =
   result &= "\n]"
 
 proc error(self: MemoryManager, accessor: int, err: typedesc, msg: string) =
-  raise newException(err, "@" & $accessor & " - invalid memory access: " & msg)
+  raise newException(err, "@" & $accessor & " - invalid memory access: " & msg & ".")
 
 proc `=destroy`*(x: MemoryManagerObject) =
   for chunk in x.chunks:
@@ -172,7 +172,7 @@ proc move*(self: MemoryManager, accessor: int, vpSrc, vpDst: VirtualPointer) =
     srcLen = self.size(accessor, vpSrc)
     dstLen = self.size(accessor, vpDst)
   if srcLen > dstLen:
-    self.error(accessor, InvalidRegionSizeError, "move destination cannot be smaller than the source.")
+    self.error(accessor, InvalidRegionSizeError, "move destination cannot be smaller than the source")
   for i in 0..srcLen - 1:
     self.write(accessor, vpDst + i, self.peek(accessor, vpSrc + i))
     cast[ptr uint8](self.chunks[int vpSrc + i].data)[] = 0
