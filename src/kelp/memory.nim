@@ -17,7 +17,6 @@ type
   MemoryManager* = ref MemoryManagerObject
   MemoryManagerObject = object
     chunks*: seq[Chunk]
-    greedy*: bool
     capacity*: HSlice[int, int]
 
   InvalidMemoryAddressError* = object of CatchableError
@@ -26,7 +25,10 @@ type
 
 
 proc `$`*(cs: seq[Chunk], columns: int = 4): string =
-  result = "VirtualMemory[\n  "
+  result = "Memory["
+  if cs.len < 1:
+    result &= "]"
+    return
   var longestID = 0
   for c in cs:
     if c.ownerID < 0: continue
@@ -49,10 +51,9 @@ proc `=destroy`*(x: MemoryManagerObject) =
   for chunk in x.chunks:
     dealloc chunk.data
 
-proc newMemoryManager*(capacity: HSlice[int, int] = HSlice[int, int](a: 0, b: -1), greedy: bool = false): MemoryManager =
+proc newMemoryManager*(capacity: HSlice[int, int] = HSlice[int, int](a: 0, b: -1)): MemoryManager =
   result = new MemoryManager
   result.capacity = capacity
-  result.greedy = greedy
 
 proc addChunk*(self: MemoryManager, ownerID: int, allocUID: uint) =
   let data = alloc0(ChunkSize)
@@ -133,10 +134,7 @@ proc alloc*(self: MemoryManager, accessor: int, size: range[1..int.high]): Virtu
   else:
     result = vpointer free.start.int
 
-    let rangeEnd: int =
-      if self.greedy:
-        int free.start + free.size - 1
-      else: int free.start + size - 1
+    let rangeEnd = int free.start + size - 1
 
     for idx in free.start.int..rangeEnd:
       self.chunks[idx].ownerID = accessor

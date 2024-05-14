@@ -1,145 +1,259 @@
-import kelp/[
-  memory,
-  blade,
-]
+import kelp/[memory, code]
 
 {.push warning[Deprecated]: off.}
 import std/[
-  os, cpuinfo, threadpool
+  os, threadpool,
+  locks, atomics,
+  cpuinfo
 ]
 {.pop.}
 
-when isMainModule:
-  import kelp/assembler
-  import std/[syncio, strutils]
-
-export
-  blade
+const
+  RegisterCount = uint16.high.int + 1
 
 type
-  BladeState* = enum
-    bsReady
-    bsRunning
-    bsExited
-    bsTrapped
+  Register* = distinct ptr uint64
+  Stack* = ref object
+    stack: seq[seq[Register]]
 
-  ScheduledBlade* = ref object
-    priority*: int
-    blade*: Blade
-    state*: BladeState
+  Blade* = ref object
+    vm: Kelp
+    stack: Stack
+    scheduler: int = -1
+    id, pc, timeout: int
+    code: seq[Instruction]
 
   Scheduler* = ref object
-    id*, ping*: int
-    kelp*: Kelp
-    shouldExit*: bool
-    scheduledBlades*, exitedBlades*: seq[int]
-    currentBlade*, currentBladeTicks*: int
+    vm: Kelp
+    id, state, limit, current: int
+    queue: seq[int]
 
   Kelp* = ref object
-    started*: bool
-    blades*: seq[ScheduledBlade]
-    schedulers*: seq[Scheduler]
-    latestScheduler*: int
-    mem*: MemoryManager
+    heartbeat: uint
+    schedule: Lock
+    unscheduled: Atomic[int]
+    blades: seq[Blade]
+    schedulers: seq[Scheduler]
+    shouldExit: bool
+    mem: MemoryManager
 
-
-proc newScheduler(kelp: Kelp, id: int): Scheduler =
-  result = new Scheduler
-  result.kelp = kelp
-  result.id = id
-
-proc newKelp*(): Kelp =
+proc newKelp*(processLimitPerScheduler: int = 255): Kelp =
   result = new Kelp
   result.mem = newMemoryManager()
   result.schedulers = newSeq[Scheduler]( countProcessors() )
-  for id in 0..result.schedulers.high:
-    result.schedulers[id] = newScheduler(result, id)
+  result.schedule.initLock
+  for idx, _ in result.schedulers:
+    result.schedulers[idx] = Scheduler(
+      vm: result,
+      id: idx,
+      limit: processLimitPerScheduler
+    )
 
-proc getCurrentBlade(self: Scheduler): ScheduledBlade =
-  result = self.kelp.blades[self.scheduledBlades[self.currentBlade]]
+proc newRegister*(): Register =
+  result = cast[Register]( allocShared0(uint64.sizeof) )
 
-proc switchBlade(self: Scheduler): bool =
-  if self.scheduledBlades.len == 0:
-    return true
-  if self.currentBladeTicks > 0:
-    dec self.currentBladeTicks
-    return
-  self.currentBlade = (self.currentBlade + 1) mod self.scheduledBlades.len
-  if self.getCurrentBlade.state == bsExited:
-    return true
-  self.currentBladeTicks = self.getCurrentBlade.priority
+proc store*(reg: Register, x: uint64) =
+  cast[ptr uint64](reg)[] = x
 
-proc start(self: Scheduler) {.thread.} =
-  while not self.kelp.started: sleep 1
-  while not self.shouldExit:
-    self.ping = (self.ping + 1) mod int.high
+proc load*(reg: Register): uint64 =
+  result = cast[ptr uint64](reg)[]
 
-    if self.switchBlade:
-      sleep 1
-      continue
+proc initRegisters*(regs: var seq[Register]) =
+  regs = newSeq[Register](RegisterCount)
+  for idx, _ in regs:
+    regs[idx] = newRegister()
 
-    var vmopt: int
-    try:
-      vmopt = self.getCurrentBlade.blade.step()
-    except Exception as e:
-      echo "blade " & $self.getCurrentBlade.blade & " got trapped: " & e.msg
-      self.getCurrentBlade.state = bsTrapped
-      self.scheduledBlades.delete self.currentBlade
-      self.exitedBlades.add self.currentBlade
+proc newStack*(): Stack =
+  result = Stack(stack: newSeq[seq[Register]](1))
+  result.stack[0].initRegisters
 
-    case vmopt:
-    of 1:
-      self.getCurrentBlade.state = bsExited
-      self.exitedBlades.add self.currentBlade
+proc reg*(self: Stack, reg: SomeInteger): Register =
+  result = self.stack[self.stack.high][reg]
+
+proc push*(self: Stack) =
+  self.stack.add newSeq[Register]()
+  self.stack[self.stack.high].initRegisters
+
+proc pop*(self: Stack) =
+  discard self.stack.pop
+
+proc newBlade*(self: Kelp, code: seq[uint8]): int =
+  self.schedule.withLock:
+    result = self.blades.len
+    self.blades.add Blade(
+      vm: self,
+      id: result,
+      code: parseCode(code),
+      stack: newStack()
+    )
+    atomicInc self.unscheduled
+
+proc layout(i: Instruction, match: openArray[OpKind]): bool =
+  if match.len != i.ops.len: return false
+  result = true
+  for idx, op in i.ops:
+    if op.kind != match[idx]: return false
+
+proc eval(self: Scheduler, blade: Blade) =
+  if blade.pc >= blade.code.len: return
+  let
+    i = blade.code[blade.pc]
+    bladeIntoScope = blade
+
+  proc reg(reg: SomeInteger): Register =
+    result = bladeIntoScope.stack.reg(reg)
+
+  case i.kind:
+  of ikMove:
+    if i.layout @[okRegister, okInstant]:
+      reg(i.ops[0].value).store(i.ops[1].value)
+    elif i.layout @[okRegister, okRegister]:
+      reg(i.ops[0].value).store(reg(i.ops[1].value).load)
+    else: discard # TODO
+
+  of ikAdd:
+    if i.layout @[okRegister, okInstant]:
+      reg(i.ops[0].value).store(reg(i.ops[0].value).load + i.ops[1].value)
+    elif i.layout @[okRegister, okRegister]:
+      reg(i.ops[0].value).store(reg(i.ops[0].value).load + reg(i.ops[1].value).load)
+    else: discard # TODO
+
+  of ikSubtract:
+    if i.layout @[okRegister, okInstant]:
+      reg(i.ops[0].value).store(reg(i.ops[0].value).load - i.ops[1].value)
+    elif i.layout @[okRegister, okRegister]:
+      reg(i.ops[0].value).store(reg(i.ops[0].value).load - reg(i.ops[1].value).load)
+    else: discard # TODO
+
+  of ikCompare:
+    let
+      src = if i.layout @[okRegister, okInstant]:
+        i.ops[1].value
+      elif i.layout @[okRegister, okRegister]:
+        reg(i.ops[1].value).load
+      else: 0 # TODO
+      dst = reg(i.ops[0].value)
+
+    if dst.load == src:  dst.store 0b010
+    elif dst.load < src: dst.store 0b001
+    elif dst.load > src: dst.store 0b100
+    else:                dst.store 0
+
+  of ikJump:
+    if i.layout @[okInstant]:
+      blade.pc = i.ops[0].value.int
+    elif i.layout @[okRegister]:
+      blade.pc = reg(i.ops[0].value).load.int
+    else: discard # TODO
+
+  of ikJumpEQ:
+    let newPc = if i.layout @[okRegister, okInstant]:
+        i.ops[1].value.int
+      elif i.layout @[okRegister, okRegister]:
+        reg(i.ops[1].value).load.int
+      else: 0 # TODO
+    case reg(i.ops[0].value).load:
+    of 0b010: blade.pc = newPc
     else: discard
 
-proc scheduleBlade(self: Scheduler, pid: int) =
-  if self.exitedBlades.len > 0:
-    self.scheduledBlades[self.exitedBlades.pop] = pid
-  else:
-    self.scheduledBlades.add pid
-  spawn self.start
+  of ikJumpNE:
+    let newPc = if i.layout @[okRegister, okInstant]:
+        i.ops[1].value.int
+      elif i.layout @[okRegister, okRegister]:
+        reg(i.ops[1].value).load.int
+      else: 0 # TODO
+    case reg(i.ops[0].value).load:
+    of 0b010: discard
+    else: blade.pc = newPc
 
-proc scheduleNewBlade*(self: Kelp, code: seq[uint8], priority: range[0..255] = 0): int =
-  let blade = ScheduledBlade(
-    priority: priority,
-    blade: newBlade(self.mem, self.blades.len, code)
-  )
-  self.blades.add blade
-  self.schedulers[self.latestScheduler].scheduleBlade(blade.blade.pid)
-  self.latestScheduler = (self.latestScheduler + 1) mod self.schedulers.len
+  of ikJumpGT:
+    let newPc = if i.layout @[okRegister, okInstant]:
+        i.ops[1].value.int
+      elif i.layout @[okRegister, okRegister]:
+        reg(i.ops[1].value).load.int
+      else: 0 # TODO
+    case reg(i.ops[0].value).load:
+    of 0b001: blade.pc = newPc
+    else: discard
 
-#proc debug*(self: Kelp) {.thread.} =
-#  while true:
-#    echo "--------------VM DEBUG--------------"
-#    for sched in self.schedulers:
-#      echo "sched: " & $sched.id & "; shouldExit: " & $sched.shouldExit & "; ping: " & $sched.ping
-#      echo "  thrs: " & $sched.scheduledBlades
+  of ikJumpLT:
+    let newPc = if i.layout @[okRegister, okInstant]:
+        i.ops[1].value.int
+      elif i.layout @[okRegister, okRegister]:
+        reg(i.ops[1].value).load.int
+      else: 0 # TODO
+    case reg(i.ops[0].value).load:
+    of 0b100: blade.pc = newPc
+    else: discard
 
-#    echo "------------------------------------"
-#    echo self.threads[0].state
-#    echo "------------------------------------"
-#    sleep 500
+  of ikJumpGE:
+    let newPc = if i.layout @[okRegister, okInstant]:
+        i.ops[1].value.int
+      elif i.layout @[okRegister, okRegister]:
+        reg(i.ops[1].value).load.int
+      else: 0 # TODO
+    case reg(i.ops[0].value).load:
+    of 0b010, 0b001: blade.pc = newPc
+    else: discard
+
+  of ikJumpLE:
+    let newPc = if i.layout @[okRegister, okInstant]:
+        i.ops[1].value.int
+      elif i.layout @[okRegister, okRegister]:
+        reg(i.ops[1].value).load.int
+      else: 0 # TODO
+    case reg(i.ops[0].value).load:
+    of 0b010, 0b100: blade.pc = newPc
+    else: discard
+
+  of ikWait:
+    if i.layout @[okInstant]:
+      echo $blade.id & " (at " & $blade.scheduler & ")" & " wait for " & $i.ops[0].value
+      blade.timeout = self.vm.heartbeat.int + i.ops[0].value.int
+    elif i.layout @[okRegister]: discard
+    else: discard
+
+  else: echo $i.kind & " unimplemented"
+
+proc start(self: Scheduler) {.thread.} =
+  self.queue = newSeqOfCap[int](self.limit)
+  while not self.vm.shouldExit:
+    if self.vm.unscheduled.load > 0:
+      self.vm.schedule.withLock:
+        for b, blade in self.vm.blades:
+          if blade.scheduler < 0 and (blade.timeout > 0 and self.vm.heartbeat.int >= blade.timeout or
+            blade.timeout == 0):
+            blade.timeout = 0
+            blade.scheduler = self.id
+            self.queue.add b
+            atomicDec self.vm.unscheduled
+            break
+    if self.queue.len > 0:
+      let current = self.vm.blades[self.queue[self.current]]
+      if current.timeout > 0 and self.vm.heartbeat.int < current.timeout:
+        if self.vm.schedule.tryAcquire:
+          self.queue.delete self.current
+          current.scheduler = -1
+          atomicInc self.vm.unscheduled
+          self.vm.schedule.release
+      else:
+        self.eval current
+        inc current.pc
+      if self.queue.len > 0: self.current = (self.current + 1) mod self.queue.len
+    else:
+      sleep 1
+
+proc startHeartbeat*(self: Kelp) {.thread.} =
+  while not self.shouldExit:
+    sleep 1
+    inc self.heartbeat
 
 proc start*(self: Kelp) {.thread.} =
-  self.started = true
-  #spawn self.debug
+  echo "------"
+  spawn self.startHeartbeat
+  for scheduler in self.schedulers:
+    spawn scheduler.start
   sync()
 
-
 when isMainModule:
-  let kb = assemble(open(commandLineParams().join()).readAll)
-
-  var buf = newStringOfCap(kb.len * 3 + 3)
-  buf.add "@["
-  for idx, b in kb:
-    buf.add b.repr
-    if idx == 0:
-      buf.add "'u8"
-    if idx != kb.high:
-      buf.add ", "
-  buf.add ']'
-  echo buf
-
-  writeFile "out.kb", kb
   echo "NOT IMPLEMENTED"

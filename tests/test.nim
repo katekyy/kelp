@@ -1,49 +1,21 @@
 import unittest
-
-import std/threadpool
-
 import kelp
-import kelp/[
-  memory,
-  vpointer,
-]
 
+import kelp/code
 
-test "vm":
+import std/[os, threadpool]
+
+test "1":
   let vm = newKelp()
-  discard vm.scheduleNewBlade(
-    @[75'u8, 66, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 255, 15, 13, 1, 0, 0, 0, 0, 0, 0, 0, 1, 15, 13, 1, 0, 0, 0, 0, 0, 0, 0, 0, 15, 16, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 8, 15, 16, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 8, 15]
-  )
-  vm.start()
+  #                  magic bytes    move #0, 65535                 add #0, 1               sleep 500            jump 0
+  #                  vvvvvvvvvvvvv  vvvvvvvvvvvvvvvvvvvvvvvvvvvvv  vvvvvvvvvvvvvvvvvvvvvv  vvvvvvvvvvvvvvvvvvv  vvvvvvvvvvvvv
+  echo vm.newBlade @[0x4b'u8, 0x42, 0, 2, 0, 0, 0, 1, 2, 255, 255, 1, 2, 0, 0, 0, 1, 1, 1, 11, 1, 1, 2, 3, 232, 4, 1, 1, 1, 0]
+  echo vm.newBlade @[0x4b'u8, 0x42, 0, 2, 0, 0, 0, 1, 2, 255, 255, 1, 2, 0, 0, 0, 1, 1, 1, 11, 1, 1, 2, 3, 232, 4, 1, 1, 1, 0]
+  spawn vm.start()
 
+  for _ in 1..10:
+    sleep 10
+    echo "spawning another: " & $vm.newBlade(@[0x4b'u8, 0x42, 0, 2, 0, 0, 0, 1, 2, 255, 255, 1, 2, 0, 0, 0, 1, 1, 1, 11, 1, 1, 2, 3, 232, 4, 1, 1, 1, 0])
 
-test "memory manager":
-  let
-    mem = newMemoryManager()
-    owner1 = 0
-    owner2 = 1
-
-  try:
-    discard mem.size(owner1, vpointer 0)
-    check false
-  except InvalidMemoryAddressError: check true
-
-  let p1 = mem.alloc(owner2, 4)
-  check p1 == 0
-  check mem.seekFreeLast() == -1
-
-  mem.free(owner2, p1)
-
-  let p2 = mem.alloc(owner1, 3)
-
-  check p2 == 0
-  check mem.seekFreeLast() == 3
-
-  let p3 = mem.realloc(owner1, p2, 8)
-
-  check p3 == 3
-  check mem.seekFreeLast() == -1
-  check mem.size(owner1, p3) == 8
-
-  when defined(debug):
-    echo mem.chunks
+  sync()
+  check true

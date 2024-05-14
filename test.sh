@@ -1,1 +1,1 @@
-nimble -d:nimOldCaseObjects $1 test
+nimble --threads:on --mm:atomicArc --cursorInference:off test
